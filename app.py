@@ -7,6 +7,7 @@ import sqlite3
 import hashlib
 import re
 from datetime import datetime
+from collections import Counter
 
 app = Flask(__name__)
 app.secret_key = '123456789' 
@@ -922,8 +923,18 @@ def recommend(user_id, filter_following):
 
     Returns:
         A list of 5 recommended posts, in reverse-chronological order.
+        Each row containing: post.id, post.content, post.created_at, user.username, user.id
 
-    To test whether your recommendation algorithm works, let's pretend we like the DIY topic. Here are some users that often post DIY comment and a few example posts. Make sure your account did not engage with anything else. You should test your algorithm with these and see if your recommendation algorithm picks up on your interest in DIY and starts showing related content.
+    To test whether your recommendation algorithm works, let's pretend we like the DIY topic.
+    Here are some users that often post DIY comments and a few example posts.
+    Make sure your account did not engage with anything else.
+    You should test your algorithm with these and see if your recommendation algorithm
+    picks up on your interest in DIY and starts showing related content.
+
+    Recommendation algorithm:
+    Implement the `recommend` function.
+    Identify a suitable, simple recommendation algorithm that will recommend 5 relevant posts on the
+    “Recommended” tab based on the posts the user reacted to positively and the users they followed.
     
     Users: @starboy99, @DancingDolphin, @blogger_bob
     Posts: 1810, 1875, 1880, 2113
@@ -933,10 +944,130 @@ def recommend(user_id, filter_following):
     - http://www.configworks.com/mz/handout_recsys_sac2010.pdf
     - https://www.researchgate.net/publication/227268858_Recommender_Systems_Handbook
     """
+    recommended_posts = []
 
-    recommended_posts = {} 
+    # If the user is not logged in, return an empty list.
+    if not user_id:
+        return recommended_posts
 
-    return recommended_posts;
+    db = get_db()
+
+    # Get followed users if necessary
+    followed_users_posts = db.execute(
+        '''SELECT post.id, post.user_id, post.content, post.created_at, user.username, user.id as user_id 
+                FROM posts post
+                JOIN users user ON post.user_id = user.id
+                WHERE post.user_id IN ( SELECT followed_id FROM follows WHERE follower_id = ? )
+                ORDER BY post.created_at DESC LIMIT 30''',
+        (user_id,)).fetchall()
+
+    # If filtering by following and user follows nobody, return an empty list.
+    if filter_following and not followed_users_posts:
+        return recommended_posts
+
+    # Get the positively reacted posts
+    posts_with_user_positive_reactions = db.execute(
+        '''SELECT post.id, post.user_id, post.content, post.created_at, user.username, user.id as user_id 
+                FROM posts post
+                JOIN users user ON post.user_id = user.id
+                WHERE post.id IN ( SELECT post_id FROM reactions WHERE user_id = ?
+                AND reaction_type IN ("like", "haha", "wow", "love") )''',
+        (user_id,)).fetchall()
+
+    # Get all posts MINUS user made and MINUS user reacted
+    all_posts_filtered = db.execute(
+        '''SELECT post.id, post.user_id, post.content, post.created_at, user.username, user.id as user_id 
+            FROM posts post 
+            JOIN users user ON post.user_id = user.id
+            WHERE post.id NOT IN ( SELECT id FROM posts WHERE user_id = ? )
+            AND post.id NOT IN ( SELECT post_id FROM reactions WHERE user_id = ? )''',
+        (user_id, user_id)).fetchall()
+
+    # Filter candidate pool if filter_following is requested
+    # We use all_posts_filtered to avoid using posts that the user has already reacted to.
+    followed_user_ids = {p['user_id'] for p in followed_users_posts}
+    if filter_following:
+        candidate_posts = [post for post in all_posts_filtered if post['user_id'] in followed_user_ids]
+    else:
+        candidate_posts = all_posts_filtered
+
+    # Get user's preferred words/subjects
+    interest_counter = Counter()
+
+    # Get user's preferred words/subjects from positive reactions (highest impact)
+    for row in posts_with_user_positive_reactions:
+        for tok in extract_tokens(row['content']):
+            weight = 5.0 if tok.startswith('#') else 3.0
+            interest_counter[tok] += weight
+
+    # Get user's preferred word/subjects from followed creators' posts (lower impact)
+    for row in followed_users_posts:
+        for tok in extract_tokens(row['content']):
+            weight = 2.0 if tok.startswith('#') else 1.0
+            interest_counter[tok] += weight
+
+    # Score candidate posts based on keyword matches with user's interests
+    scored_posts = []
+    unscored_posts = []
+
+    for post in candidate_posts:
+        score = 0.0
+        for tok in extract_tokens(post['content']):
+            if tok in interest_counter:
+                tok_weight = 2.0 if tok.startswith('#') else 1.0
+                score += interest_counter[tok] * tok_weight
+
+        if score > 0:
+            # Affinity multiplier: slightly boost followed creators in the global feed
+            affinity = 1.3 if (not filter_following and post in followed_users_posts) else 1.0
+            scored_posts.append((score * affinity, post))
+        else:
+            unscored_posts.append(post)
+
+    # Sort scored candidates by score (highest first), breaking ties with recency
+    scored_posts.sort(key=lambda x: (x[0], x[1]['created_at']), reverse=True)
+    top_5 = [post for score, post in scored_posts[:5]]
+
+    # If fewer than 5 posts matched, backfill with the newest unscored posts
+    if len(top_5) < 5:
+        unscored_posts.sort(key=lambda p: p['created_at'], reverse=True)
+        top_5.extend(unscored_posts[:5 - len(top_5)])
+
+    # Finally, return the 5 recommended posts in reverse-chronological order
+    top_5.sort(key=lambda p: p['created_at'], reverse=True)
+    return top_5
+
+def extract_tokens(text):
+    """
+    Extracts informative keywords and hashtags from the post's text:
+    - Preserves hashtags as distinct thematic markers.
+    - Lowers case and strips punctuation.
+    - Removes stopwords and short words (<= 2 characters).
+    """
+    if not text:
+        return []
+    tokens = re.findall(r'#?\b\w+\b', text.lower())
+    return [t for t in tokens if t not in STOPWORDS and len(t) > 2]
+
+STOPWORDS = {
+    'i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you', 'your', 'yours',
+    'yourself', 'yourselves', 'he', 'him', 'his', 'himself', 'she', 'her', 'hers',
+    'herself', 'it', 'its', 'itself', 'they', 'them', 'their', 'theirs', 'themselves',
+    'what', 'which', 'who', 'whom', 'this', 'that', 'these', 'those', 'am', 'is', 'are',
+    'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'having', 'do', 'does',
+    'did', 'doing', 'a', 'an', 'the', 'and', 'but', 'if', 'or', 'because', 'as', 'until',
+    'while', 'of', 'at', 'by', 'for', 'with', 'about', 'against', 'between', 'into',
+    'through', 'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down',
+    'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further', 'then', 'once', 'here',
+    'there', 'when', 'where', 'why', 'how', 'all', 'any', 'both', 'each', 'few', 'more',
+    'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so',
+    'than', 'too', 'very', 's', 't', 'can', 'will', 'just', 'don', 'should', 'now',
+    've', 'll', 're', 'm', 'd', 'http', 'https', 'com', 'www', 'finally', 'finished',
+    'started', 'today', 'yesterday', 'tomorrow', 'day', 'time', 'look', 'think', 'feel',
+    'feeling', 'always', 'never', 'really', 'much', 'many', 'good', 'great', 'well', 'way',
+    'new', 'one', 'two', 'first', 'last', 'even', 'still', 'make', 'made', 'take', 'took',
+    'see', 'saw', 'come', 'came', 'go', 'went', 'know', 'knew', 'back', 'get', 'got'
+}
 
 if __name__ == '__main__':
     app.run(debug=True, port=8080)
