@@ -7,6 +7,38 @@
 </div>
 
 {% if session.get('user_id') %}
+<!-- Design Claim 25: Progressive access controls reduce the harm a newcomer can do to a community while learning the ropes. -->
+{% if user_trust and user_trust.level == 1 %}
+<div class="col-md-8 mx-auto mb-3">
+  <div class="card shadow-sm border-0 border-start border-4 border-warning bg-light">
+    <div class="card-body py-2 px-3">
+      <div class="d-flex justify-content-between align-items-center mb-1">
+        <div>
+          <span class="badge bg-warning text-dark me-1">🌱 Newcomer</span>
+        </div>
+        <small class="fw-bold text-warning">{{ user_trust.progress_pct }}% Unlocked</small>
+      </div>
+
+      <!-- Progress bar toward Level 2 Full Member -->
+      <div class="progress mb-2" style="height: 6px;">
+        <div class="progress-bar bg-warning" role="progressbar" style="width: {{ user_trust.progress_pct }}%;" aria-valuenow="{{ user_trust.progress_pct }}" aria-valuemin="0" aria-valuemax="100"></div>
+      </div>
+
+      <div class="d-flex justify-content-between align-items-center small text-muted">
+        <div>
+          <span>Reactions: <strong>{{ user_trust.reactions_count }}/{{ user_trust.reactions_needed }}</strong></span>
+          <span class="mx-1">•</span>
+          <span>Contributions: <strong>{{ user_trust.contributions_count }}/{{ user_trust.contributions_needed }}</strong></span>
+        </div>
+        <div>
+          <span class="text-secondary">🔒 Links locked</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 <div class="col-md-8 mx-auto mb-4">
   <div class="card shadow-sm">
     <div class="card-body">
@@ -14,6 +46,11 @@
       <form action="{{ url_for('add_post') }}" method="POST">
         <div class="mb-3">
           <textarea class="form-control" name="content" rows="3" placeholder="What's on your mind, {{ session.get('username') }}?" required></textarea>
+          {% if user_trust and not user_trust.can_post_links %}
+          <div class="form-text text-muted mt-2">
+            🔒 <em>Sharing external links will be unlocked once you become a Full Member.</em>
+          </div>
+          {% endif %}
         </div>
         <button type="submit" class="btn btn-primary float-end">Post</button>
       </form>
@@ -52,16 +89,25 @@
   <div class="card mb-4" id="post-{{ entry.post.id }}">
     <div class="card-body">
       <div class="d-flex justify-content-between align-items-center">
-        <h3 class="card-title mb-0">
-          {% if entry.followed_poster %}
-          <a href="/u/{{ entry.post.user_id }}">{{ user_display(entry.post.username) }}<span class="text-success p-1" data-toggle="tooltip" data-placement="top" title="You are following this user"> ✓ </span>
-</a>
-          {% else %}
-          <a href="/u/{{ entry.post.user_id }}">{{ user_display(entry.post.username) }} </a>
+        <div>
+          <h3 class="card-title mb-0">
+            {% if entry.followed_poster %}
+            <a href="/u/{{ entry.post.user_id }}">{{ user_display(entry.post.username) }}<span class="text-success p-1" data-toggle="tooltip" data-placement="top" title="You are following this user"> ✓ </span></a>
+            {% else %}
+            <a href="/u/{{ entry.post.user_id }}">{{ user_display(entry.post.username) }}</a>
+            {% endif %}
+            {% if entry.is_newcomer %}
+            <!-- Design Claim 21: Newcomer badge -->
+            <span class="badge bg-success-subtle text-success border border-success ms-1 py-1 px-2" style="font-size: 0.72rem; vertical-align: middle;">🌱 Newcomer</span>
+            {% endif %}
+          </h3>
+          {% if entry.is_newcomer %}
+          <div class="text-success small mt-1" style="font-size: 0.75rem;">
+            🌱 <em>New community member, please be welcoming!</em>
+          </div>
           {% endif %}
-        </h3>
+        </div>
 
-        
         {% if session.get('user_id') == entry.post.user_id %}
         <div class="d-flex align-items-center">
             <small class="text-muted me-3">{{ entry.post.created_at|datetimeformat }}</small>
@@ -172,6 +218,19 @@
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
+          <!-- Design Claim 21: Explicitly discouraging hostility toward newcomers who make mistakes can promote friendly initial interactions between newcomers and old-timers. -->
+          {% if entry.is_newcomer and session.get('user_id') != entry.post.user_id %}
+          <div class="alert alert-info border-info-subtle py-2 px-3 mb-3" style="font-size: 0.88rem;">
+            <div class="d-flex align-items-center mb-1">
+              <span class="me-2" style="font-size: 1.15rem;">🌱</span>
+              <strong>Community Guideline: Please be kind to newcomers!</strong>
+            </div>
+            <p class="mb-0 text-muted small">
+              <strong>@{{ entry.post.username }}</strong> is new to our community. Please be patient with beginner questions or mistakes and keep interactions welcoming and encouraging.
+            </p>
+          </div>
+          {% endif %}
+
           <form action="/posts/{{ entry.post.id }}/comment" method="POST">
             <div class="mb-3">
               <label for="comment-content-{{ entry.post.id }}" class="form-label">Your Comment</label>

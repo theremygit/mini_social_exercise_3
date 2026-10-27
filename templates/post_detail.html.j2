@@ -6,9 +6,20 @@
   <div class="card shadow-sm">
     <div class="card-body">
       <div class="d-flex justify-content-between align-items-center">
-        <h3 class="card-title mb-0">
-          <a href="/u/{{ post.user_id }}">{{ user_display(post.username) }}</a>
-        </h3>
+        <div>
+          <h3 class="card-title mb-0">
+            <a href="/u/{{ post.user_id }}">{{ user_display(post.username) }}</a>
+            {% if post.is_newcomer %}
+            <!-- Design Claim 21: Newcomer badge -->
+            <span class="badge bg-success-subtle text-success border border-success ms-1 py-1 px-2" style="font-size: 0.72rem; vertical-align: middle;">🌱 Newcomer</span>
+            {% endif %}
+          </h3>
+          {% if post.is_newcomer %}
+          <div class="text-success small mt-1" style="font-size: 0.75rem;">
+            🌱 <em>New community member, please be welcoming!</em>
+          </div>
+          {% endif %}
+        </div>
         {% if session.get('user_id') == post.user_id %}
         <div class="d-flex align-items-center">
             <small class="text-muted me-3">{{ post.created_at|datetimeformat }}</small>
@@ -109,6 +120,19 @@
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <div class="modal-body">
+        <!-- Design Claim 21: Explicitly discouraging hostility toward newcomers who make mistakes can promote friendly initial interactions between newcomers and old-timers. -->
+        {% if post.is_newcomer and session.get('user_id') != post.user_id %}
+        <div class="alert alert-info border-info-subtle py-2 px-3 mb-3" style="font-size: 0.88rem;">
+          <div class="d-flex align-items-center mb-1">
+            <span class="me-2" style="font-size: 1.15rem;">🌱</span>
+            <strong>Community Guideline: Please be kind to newcomers!</strong>
+          </div>
+          <p class="mb-0 text-muted small">
+            <strong>@{{ post.username }}</strong> is new to our community. Please be patient with beginner questions or mistakes, and keep interactions welcoming and encouraging.
+          </p>
+        </div>
+        {% endif %}
+
         <form action="/posts/{{ post.id }}/comment" method="POST">
           <div class="mb-3">
             <label for="comment-content-{{ post.id }}" class="form-label">Your Comment</label>

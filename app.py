@@ -95,6 +95,131 @@ REACTION_EMOJIS = {
 }
 REACTION_TYPES = list(REACTION_EMOJIS.keys())
 
+# Coding Assignment #3: Design Claims from Chapter 5 (The Challenges of Dealing with Newcomers)
+def is_newcomer(user_id):
+    """
+    Design Claim 21: Explicitly discouraging hostility toward newcomers who make mistakes can promote friendly initial interactions between newcomers and old-timers.
+    Identifies if a user is a newcomer (account created < 14 days ago or has posted < 3 posts).
+    """
+    if not user_id:
+        return False
+    user = query_db('SELECT created_at FROM users WHERE id = ?', (user_id,), one=True)
+    if not user:
+        return False
+
+    post_count = query_db('SELECT COUNT(*) as cnt FROM posts WHERE user_id = ?', (user_id,), one=True)
+    cnt = post_count['cnt'] if post_count else 0
+    if cnt < 3:
+        return True
+
+    try:
+        created_val = user['created_at']
+        if isinstance(created_val, str):
+            created_dt = datetime.strptime(created_val.split('.')[0], '%Y-%m-%d %H:%M:%S')
+        else:
+            created_dt = created_val
+        if (datetime.now() - created_dt).days < 14:
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+def get_user_trust_level(user_id):
+    """
+    Design Claim 25: Progressive access controls reduce the harm a newcomer can do to a community while learning the ropes.
+    Calculates the user's progressive access/trust level:
+      - Level 1 (Newcomer): Restricted permissions (external links blocked to prevent spam/harm).
+      - Level 2 (Full Member): Permanently unlocked once basic positive participation is demonstrated
+        (at least 3 reactions and at least 1 contribution: post or comment).
+        Once achieved, Full Member status is permanent and not lost even if reactions are removed.
+    """
+    if not user_id:
+        return None
+
+    db = get_db()
+    # Ensure permanent trust tracking table exists
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS user_trust (
+            user_id INTEGER PRIMARY KEY,
+            is_full_member INTEGER DEFAULT 0,
+            graduated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # Check if user has already permanently graduated to Full Member
+    trust_row = db.execute('SELECT is_full_member FROM user_trust WHERE user_id = ?', (user_id,)).fetchone()
+    if trust_row and trust_row['is_full_member'] == 1:
+        r_row = query_db('SELECT COUNT(*) as cnt FROM reactions WHERE user_id = ?', (user_id,), one=True)
+        reactions_count = r_row['cnt'] if r_row else 0
+        p_row = query_db('SELECT COUNT(*) as cnt FROM posts WHERE user_id = ?', (user_id,), one=True)
+        posts_count = p_row['cnt'] if p_row else 0
+        c_row = query_db('SELECT COUNT(*) as cnt FROM comments WHERE user_id = ?', (user_id,), one=True)
+        comments_count = c_row['cnt'] if c_row else 0
+
+        return {
+            'level': 2,
+            'level_name': 'Full Member',
+            'reactions_count': reactions_count,
+            'reactions_needed': 3,
+            'contributions_count': posts_count + comments_count,
+            'contributions_needed': 1,
+            'can_post_links': True,
+            'progress_pct': 100,
+            'is_permanent': True
+        }
+
+    # Otherwise evaluate current activity
+    r_row = query_db('SELECT COUNT(*) as cnt FROM reactions WHERE user_id = ?', (user_id,), one=True)
+    reactions_count = r_row['cnt'] if r_row else 0
+
+    p_row = query_db('SELECT COUNT(*) as cnt FROM posts WHERE user_id = ?', (user_id,), one=True)
+    posts_count = p_row['cnt'] if p_row else 0
+
+    c_row = query_db('SELECT COUNT(*) as cnt FROM comments WHERE user_id = ?', (user_id,), one=True)
+    comments_count = c_row['cnt'] if c_row else 0
+
+    total_contributions = posts_count + comments_count
+    reactions_needed = 3
+    contributions_needed = 1
+
+    is_full_member = (reactions_count >= reactions_needed and total_contributions >= contributions_needed)
+
+    if is_full_member:
+        # Permanently record graduation in the database
+        db.execute('INSERT OR REPLACE INTO user_trust (user_id, is_full_member) VALUES (?, 1)', (user_id,))
+        db.commit()
+        # Notify the user if they just upgraded from Level 1 Newcomer (0 -> 1)
+        if trust_row is not None and trust_row['is_full_member'] == 0:
+            try:
+                flash('⭐ Congratulations! You have been promoted to Full Member (Trust Level 2). Sharing external links is now permanently unlocked!', 'success')
+            except RuntimeError:
+                pass
+    elif trust_row is None:
+        # Track that this user started at Level 1 Newcomer so we can detect their future upgrade
+        db.execute('INSERT OR IGNORE INTO user_trust (user_id, is_full_member) VALUES (?, 0)', (user_id,))
+        db.commit()
+
+    if is_full_member:
+        progress_pct = 100
+    else:
+        react_part = (min(reactions_count, reactions_needed) / float(reactions_needed)) * 50
+        contrib_part = (min(total_contributions, contributions_needed) / float(contributions_needed)) * 50
+        progress_pct = int(react_part + contrib_part)
+
+    return {
+        'level': 2 if is_full_member else 1,
+        'level_name': 'Full Member' if is_full_member else 'Newcomer',
+        'reactions_count': reactions_count,
+        'reactions_needed': reactions_needed,
+        'contributions_count': total_contributions,
+        'contributions_needed': contributions_needed,
+        'can_post_links': is_full_member,
+        'progress_pct': progress_pct,
+        'is_permanent': is_full_member
+    }
+
 
 @app.route('/')
 def feed():
@@ -189,7 +314,8 @@ def feed():
             'reactions': reactions,
             'user_reaction': user_reaction,
             'followed_poster': followed_poster,
-            'comments': comments_moderated
+            'comments': comments_moderated,
+            'is_newcomer': is_newcomer(post['user_id'])  # Design Claim 21: Explicitly discouraging hostility toward newcomers who make mistakes can promote friendly initial interactions between newcomers and old-timers.
         })
 
     #  4. Render Template with Pagination Info 
@@ -200,7 +326,8 @@ def feed():
                            page=page, # Pass current page number
                            per_page=POSTS_PER_PAGE, # Pass items per page
                            reaction_emojis=REACTION_EMOJIS,
-                           reaction_types=REACTION_TYPES)
+                           reaction_types=REACTION_TYPES,
+                           user_trust=get_user_trust_level(current_user_id))  # Design Claim 25: Progressive access controls reduce the harm a newcomer can do to a community while learning the ropes.
 
 @app.route('/posts/new', methods=['POST'])
 def add_post():
@@ -214,6 +341,14 @@ def add_post():
 
     # Get content from the submitted form
     content = request.form.get('content')
+
+    # Design Claim 25: Progressive access controls reduce the harm a newcomer can do to a community while learning the ropes.
+    # Level 1 Newcomers cannot post external links until reaching Level 2 (Full Member)
+    trust_info = get_user_trust_level(user_id)
+    if trust_info and not trust_info['can_post_links']:
+        if content and re.search(r'https?://|www\.', content, re.IGNORECASE):
+            flash('🔒 Progressive Access Control (Level 1: Newcomer): External links are locked to protect the community from spam. Reach Full Member status to unlock link posting!', 'warning')
+            return redirect(url_for('feed'))
 
     # Pass the user's content through the moderation function
     moderated_content = content
@@ -371,6 +506,7 @@ def post_detail(post_id):
     # Unpack the tuple from moderate_content, we only need the moderated content string here
     moderated_post_content, _ = moderate_content(post['content'])
     post['content'] = moderated_post_content
+    post['is_newcomer'] = is_newcomer(post['user_id'])  # Design Claim 21: Explicitly discouraging hostility toward newcomers who make mistakes can promote friendly initial interactions between newcomers and old-timers.
 
     #  Fetch Reactions (No moderation needed) 
     reactions = query_db('''
@@ -390,6 +526,7 @@ def post_detail(post_id):
         print(comment['content'])
         moderated_comment_content, _ = moderate_content(comment['content'])
         comment['content'] = moderated_comment_content
+        comment['is_newcomer'] = is_newcomer(comment['user_id'])  # Design Claim 21: Explicitly discouraging hostility toward newcomers who make mistakes can promote friendly initial interactions between newcomers and old-timers.
         comments.append(comment)
 
     # Pass the moderated data to the template
@@ -398,7 +535,8 @@ def post_detail(post_id):
                            reactions=reactions,
                            comments=comments,
                            reaction_emojis=REACTION_EMOJIS,
-                           reaction_types=REACTION_TYPES)
+                           reaction_types=REACTION_TYPES,
+                           is_newcomer=post['is_newcomer'])
 
 @app.route('/about')
 def about():
@@ -492,6 +630,14 @@ def add_comment(post_id):
 
     # Get content from the submitted form
     content = request.form.get('content')
+
+    # Design Claim 25: Progressive access controls reduce the harm a newcomer can do to a community while learning the ropes.
+    # Level 1: Newcomers cannot post external links in comments
+    trust_info = get_user_trust_level(user_id)
+    if trust_info and not trust_info['can_post_links']:
+        if content and re.search(r'https?://|www\.', content, re.IGNORECASE):
+            flash('🔒 Progressive Access Control (Level 1: Newcomer): External links are locked in comments until you reach Full Member status.', 'warning')
+            return redirect(request.referrer or url_for('post_detail', post_id=post_id))
 
     # Basic validation to ensure comment is not empty
     if content and content.strip():
